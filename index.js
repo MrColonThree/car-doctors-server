@@ -1,13 +1,25 @@
 const express = require("express");
 const cors = require("cors");
+const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const app = express();
 require("dotenv").config();
+const app = express();
 const port = process.env.PORT || 7000;
 
 // middleware
-app.use(cors());
-app.use(express.json(4));
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://travel-guru-6f389.web.app",
+      "travel-guru-6f389.firebaseapp.com",
+    ],
+    credentials: true,
+  })
+);
+app.use(express.json());
+app.use(cookieParser());
 
 const uri = `mongodb+srv://${process.env.USER_DB}:${process.env.PASS_DB}@cluster0.edvzxqj.mongodb.net/?retryWrites=true&w=majority`;
 
@@ -20,31 +32,86 @@ const client = new MongoClient(uri, {
   },
 });
 
+// middlewares
+const logger = (req, res, next) => {
+  console.log("log: info", req.method, req.url);
+  next();
+};
+
+const verifyToken = (req, res, next) => {
+  const token = req?.cookies?.token;
+
+  //if no token available
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (error, decoded) => {
+    if (error) {
+      return res.status(401).send({ message: "unauthorized access" });
+    }
+    req.user = decoded;
+    next();
+  });
+};
+
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const serviceCollection = client.db("carDoctor").collection("services");
     const bookingCollection = client.db("carDoctor").collection("bookings");
 
+    // auth related api
+    app.post("/jwt", logger, async (req, res) => {
+      const user = req.body;
+      console.log("user for token", user);
+      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: "1h",
+      });
+
+      res
+        .cookie("token", token, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "none",
+        })
+        .send({ success: true });
+    });
+
+    app.post("/logout", async (req, res) => {
+      const user = req.body;
+      console.log("Logged out", user);
+      res.clearCookie("token", { maxAge: 0 }).send({ success: true });
+    });
+
+    // services related api
     app.get("/services", async (req, res) => {
       const cursor = serviceCollection.find();
       const result = await cursor.toArray();
       res.send(result);
     });
+
     app.get("/services/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
+
       const options = {
+        // Include only the `title` and `imdb` fields in the returned document
         projection: { title: 1, price: 1, service_id: 1, img: 1 },
       };
+
       const result = await serviceCollection.findOne(query, options);
       res.send(result);
     });
 
-    //  bookings
-    app.get("/bookings", async (req, res) => {
+    // bookings
+    app.get("/bookings", logger, verifyToken, async (req, res) => {
+      console.log(req.query.email);
+      console.log("token owner info", req.user);
+      if (req.user.email !== req.query.email) {
+        return res.status(403).send({ message: "forbidden access" });
+      }
       let query = {};
       if (req.query?.email) {
         query = { email: req.query.email };
@@ -65,12 +132,12 @@ async function run() {
       const filter = { _id: new ObjectId(id) };
       const updatedBooking = req.body;
       console.log(updatedBooking);
-      const updatedDoc = {
+      const updateDoc = {
         $set: {
           status: updatedBooking.status,
         },
       };
-      const result = await bookingCollection.updateOne(filter, updatedDoc);
+      const result = await bookingCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
 
@@ -80,11 +147,12 @@ async function run() {
       const result = await bookingCollection.deleteOne(query);
       res.send(result);
     });
+
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
@@ -97,5 +165,5 @@ app.get("/", (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log("Car doctor server is running");
+  console.log(`Car Doctor Server is running on port ${port}`);
 });
